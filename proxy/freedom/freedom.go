@@ -1,3 +1,4 @@
+//go:build !confonly
 // +build !confonly
 
 package freedom
@@ -35,16 +36,57 @@ func init() {
 	}))
 }
 
+type UDPWriter struct {
+	conn net.PacketConn
+}
+
+func (w *UDPWriter) WritePacket(payload *buf.Buffer, addr *net.UDPAddr) error {
+	_, err := w.conn.WriteTo(payload.Bytes(), addr)
+	return err
+}
+
+// Dummy method.
+func (w *UDPWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
+	return nil
+}
+
+type UDPReader struct {
+	conn net.PacketConn
+}
+
+// Dummy method.
+func (v *UDPReader) ReadMultiBuffer() (buf.MultiBuffer, error) {
+	return nil, nil
+}
+
+func (w *UDPReader) ReadPacket() (*buf.Buffer, *net.UDPAddr, error) {
+	buffer := buf.New()
+	buffer.Resize(0, int32(buf.Size))
+	n, addr, err := w.conn.ReadFrom(buffer.Bytes())
+	if err != nil {
+		buffer.Release()
+		return nil, nil, err
+	}
+	buffer.Resize(0, int32(n))
+
+	uAddr, err := net.ResolveUDPAddr("udp", addr.String())
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return buffer, uAddr, nil
+}
+
 // Handler handles Freedom connections.
 type Handler struct {
 	policyManager policy.Manager
 	dns           dns.Client
-	config        *Config
+	config        Config
 }
 
 // Init initializes the Handler with necessary parameters.
 func (h *Handler) Init(config *Config, pm policy.Manager, d dns.Client) error {
-	h.config = config
+	h.config = *config
 	h.policyManager = pm
 	h.dns = d
 
@@ -112,72 +154,120 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 	input := link.Reader
 	output := link.Writer
 
-	var conn internet.Connection
-	err := retry.ExponentialBackoff(5, 100).On(func() error {
-		dialDest := destination
-		if h.config.useIP() && dialDest.Address.Family().IsDomain() {
-			ip := h.resolveIP(ctx, dialDest.Address.Domain(), dialer.Address())
-			if ip != nil {
-				dialDest = net.Destination{
-					Network: dialDest.Network,
-					Address: ip,
-					Port:    dialDest.Port,
-				}
-				newError("dialing to to ", dialDest).WriteToLog(session.ExportIDToError(ctx))
-			}
-		}
-
-		rawConn, err := dialer.Dial(ctx, dialDest)
-		if err != nil {
-			return err
-		}
-		conn = rawConn
-		return nil
-	})
-	if err != nil {
-		return newError("failed to open connection to ", destination).Base(err)
-	}
-	defer conn.Close() // nolint: errcheck
-
 	plcy := h.policy()
 	ctx, cancel := context.WithCancel(ctx)
 	timer := signal.CancelAfterInactivity(ctx, cancel, plcy.Timeouts.ConnectionIdle)
 
-	requestDone := func() error {
-		defer timer.SetTimeout(plcy.Timeouts.DownlinkOnly)
+	if destination.Network == net.Network_TCP {
+		var conn internet.Connection
+		err := retry.ExponentialBackoff(5, 100).On(func() error {
+			dialDest := destination
+			if h.config.useIP() && dialDest.Address.Family().IsDomain() {
+				ip := h.resolveIP(ctx, dialDest.Address.Domain(), dialer.Address())
+				if ip != nil {
+					dialDest = net.Destination{
+						Network: dialDest.Network,
+						Address: ip,
+						Port:    dialDest.Port,
+					}
+					newError("dialing to to ", dialDest).WriteToLog(session.ExportIDToError(ctx))
+				}
+			}
 
-		var writer buf.Writer
-		if destination.Network == net.Network_TCP {
-			writer = buf.NewWriter(conn)
+			rawConn, err := dialer.Dial(ctx, dialDest)
+			if err != nil {
+				return err
+			}
+			conn = rawConn
+			return nil
+		})
+		if err != nil {
+			return newError("failed to open connection to ", destination).Base(err)
+		}
+		defer conn.Close() // nolint: errcheck
+
+		requestDone := func() error {
+			defer timer.SetTimeout(plcy.Timeouts.DownlinkOnly)
+
+			var writer buf.Writer
+			if destination.Network == net.Network_TCP {
+				writer = buf.NewWriter(conn)
+				if err := buf.Copy(input, writer, buf.UpdateActivity(timer)); err != nil {
+					return newError("failed to process request").Base(err)
+				}
+			} else {
+				writer = &buf.SequentialWriter{Writer: conn}
+				if err := buf.Copy(input, writer, buf.UpdateActivity(timer)); err != nil {
+					return newError("failed to process request").Base(err)
+				}
+			}
+
+			return nil
+		}
+
+		responseDone := func() error {
+			defer timer.SetTimeout(plcy.Timeouts.UplinkOnly)
+
+			var reader buf.Reader
+			if destination.Network == net.Network_TCP {
+				reader = buf.NewReader(conn)
+			} else {
+				reader = buf.NewPacketReader(conn)
+			}
+			if err := buf.Copy(reader, output, buf.UpdateActivity(timer)); err != nil {
+				return newError("failed to process response").Base(err)
+			}
+
+			return nil
+		}
+
+		if err := task.Run(ctx, requestDone, task.OnSuccess(responseDone, task.Close(output))); err != nil {
+			return newError("connection ends").Base(err)
+		}
+	} else {
+		outbound := session.OutboundFromContext(ctx)
+		if outbound == nil {
+			outbound = new(session.Outbound)
+			ctx = session.ContextWithOutbound(ctx, outbound)
+		}
+
+		if destination.Address.Family().IsIP() && destination.Address.IP().IsLoopback() {
+			outbound.Gateway = net.LocalHostIP
 		} else {
-			writer = &buf.SequentialWriter{Writer: conn}
+			if internet.SendThroughIP != nil {
+				outbound.Gateway = net.IPAddress(internet.SendThroughIP)
+			}
 		}
 
-		if err := buf.Copy(input, writer, buf.UpdateActivity(timer)); err != nil {
-			return newError("failed to process request").Base(err)
+		conn, err := dialer.DialUDP(ctx)
+		if err != nil {
+			return newError("failed to dial UDP in freedom").Base(err)
+		}
+		defer conn.Close() // nolint: errcheck
+
+		requestDone := func() error {
+			defer timer.SetTimeout(plcy.Timeouts.DownlinkOnly)
+
+			if err := buf.CopyPacket(input, &UDPWriter{conn: conn}, buf.UpdateActivity(timer)); err != nil {
+				return newError("failed to process request").Base(err)
+			}
+
+			return nil
 		}
 
-		return nil
-	}
+		responseDone := func() error {
+			defer timer.SetTimeout(plcy.Timeouts.UplinkOnly)
 
-	responseDone := func() error {
-		defer timer.SetTimeout(plcy.Timeouts.UplinkOnly)
+			if err := buf.CopyPacket(&UDPReader{conn: conn}, output, buf.UpdateActivity(timer)); err != nil {
+				return newError("failed to process response").Base(err)
+			}
 
-		var reader buf.Reader
-		if destination.Network == net.Network_TCP {
-			reader = buf.NewReader(conn)
-		} else {
-			reader = buf.NewPacketReader(conn)
-		}
-		if err := buf.Copy(reader, output, buf.UpdateActivity(timer)); err != nil {
-			return newError("failed to process response").Base(err)
+			return nil
 		}
 
-		return nil
-	}
-
-	if err := task.Run(ctx, requestDone, task.OnSuccess(responseDone, task.Close(output))); err != nil {
-		return newError("connection ends").Base(err)
+		if err := task.Run(ctx, requestDone, task.OnSuccess(responseDone, task.Close(output))); err != nil {
+			return newError("connection ends").Base(err)
+		}
 	}
 
 	return nil

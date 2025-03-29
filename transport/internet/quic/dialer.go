@@ -1,3 +1,4 @@
+//go:build !confonly
 // +build !confonly
 
 package quic
@@ -140,10 +141,17 @@ func (s *clientSessions) openConnection(destAddr net.Addr, config *Config, tlsCo
 
 	sessions = removeInactiveSessions(sessions)
 
-	rawConn, err := internet.ListenSystemPacket(context.Background(), &net.UDPAddr{
+	srcAddr := &net.UDPAddr{
 		IP:   []byte{0, 0, 0, 0},
 		Port: 0,
-	}, sockopt)
+	}
+	if internet.SendThroughIP != nil {
+		srcAddr = &net.UDPAddr{
+			IP:   internet.SendThroughIP,
+			Port: 0,
+		}
+	}
+	rawConn, err := internet.ListenSystemPacket(context.Background(), srcAddr, sockopt)
 	if err != nil {
 		return nil, err
 	}

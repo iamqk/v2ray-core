@@ -11,6 +11,7 @@ import (
 
 type ActivityUpdater interface {
 	Update()
+	SetTimeout(time.Duration)
 }
 
 type ActivityTimer struct {

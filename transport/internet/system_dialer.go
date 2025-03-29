@@ -9,6 +9,8 @@ import (
 	"v2ray.com/core/common/session"
 )
 
+var SendThroughIP net.IP
+
 var (
 	effectiveSystemDialer SystemDialer = &DefaultSystemDialer{}
 )
@@ -52,6 +54,20 @@ func (d *DefaultSystemDialer) Dial(ctx context.Context, src net.Address, dest ne
 				Port: 0,
 			}
 		}
+		if SendThroughIP != nil {
+			srcAddr = &net.UDPAddr{
+				IP:   SendThroughIP,
+				Port: 0,
+			}
+		}
+
+		if dest.Address.Family().IsIP() && dest.Address.IP().IsLoopback() {
+			srcAddr = &net.UDPAddr{
+				IP:   net.LocalHostIP.IP(),
+				Port: 0,
+			}
+		}
+
 		packetConn, err := ListenSystemPacket(ctx, srcAddr, sockopt)
 		if err != nil {
 			return nil, err
@@ -66,10 +82,26 @@ func (d *DefaultSystemDialer) Dial(ctx context.Context, src net.Address, dest ne
 		}, nil
 	}
 
+	localAddr := resolveSrcAddr(dest.Network, src)
+	if SendThroughIP != nil {
+		localAddr = &net.TCPAddr{
+			IP:   SendThroughIP,
+			Port: 0,
+		}
+	}
+
+	if dest.Address.Family().IsIP() && dest.Address.IP().IsLoopback() {
+		localAddr = &net.TCPAddr{
+			IP:   net.LocalHostIP.IP(),
+			Port: 0,
+		}
+	}
+
 	dialer := &net.Dialer{
 		Timeout:   time.Second * 16,
 		DualStack: true,
-		LocalAddr: resolveSrcAddr(dest.Network, src),
+		LocalAddr: localAddr,
+		//LocalAddr: resolveSrcAddr(dest.Network, src),
 	}
 
 	if sockopt != nil || len(d.controllers) > 0 {

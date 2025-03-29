@@ -1,10 +1,12 @@
 package mux
 
 import (
+	"io"
 	"sync"
 
 	"v2ray.com/core/common"
 	"v2ray.com/core/common/buf"
+	"v2ray.com/core/common/net"
 	"v2ray.com/core/common/protocol"
 )
 
@@ -141,6 +143,7 @@ type Session struct {
 	parent       *SessionManager
 	ID           uint16
 	transferType protocol.TransferType
+	destination  net.Destination
 }
 
 // Close closes all resources associated with this session.
@@ -152,7 +155,7 @@ func (s *Session) Close() error {
 }
 
 // NewReader creates a buf.Reader based on the transfer type of this Session.
-func (s *Session) NewReader(reader *buf.BufferedReader) buf.Reader {
+func (s *Session) NewReader(reader io.Reader) buf.Reader {
 	if s.transferType == protocol.TransferTypeStream {
 		return NewStreamReader(reader)
 	}

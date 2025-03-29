@@ -211,6 +211,19 @@ func (h *Handler) getStatCouterConnection(conn internet.Connection) internet.Con
 	return conn
 }
 
+func (h *Handler) DialUDP(ctx context.Context) (net.PacketConn, error) {
+	if h.senderSettings.Via != nil {
+		outbound := session.OutboundFromContext(ctx)
+		if outbound == nil {
+			outbound = new(session.Outbound)
+			ctx = session.ContextWithOutbound(ctx, outbound)
+		}
+		outbound.Gateway = h.senderSettings.Via.AsAddress()
+	}
+
+	return internet.DialUDP(ctx, h.streamSettings)
+}
+
 // GetOutbound implements proxy.GetOutbound.
 func (h *Handler) GetOutbound() proxy.Outbound {
 	return h.proxy

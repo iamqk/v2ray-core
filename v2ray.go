@@ -1,9 +1,11 @@
+//go:build !confonly
 // +build !confonly
 
 package core
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"sync"
 
@@ -55,19 +57,24 @@ func (r *resolution) resolve(allFeatures []features.Feature) (bool, error) {
 
 	callback := reflect.ValueOf(r.callback)
 	var input []reflect.Value
+	var inputTypes string
+
 	callbackType := callback.Type()
 	for i := 0; i < callbackType.NumIn(); i++ {
 		pt := callbackType.In(i)
 		for _, f := range fs {
 			if reflect.TypeOf(f).AssignableTo(pt) {
 				input = append(input, reflect.ValueOf(f))
+				inputTypes = inputTypes + reflect.TypeOf(f).Name() + " "
 				break
 			}
 		}
 	}
 
 	if len(input) != callbackType.NumIn() {
-		panic("Can't get all input parameters")
+		output := fmt.Sprintf("Can't get all input parameters, input is %s, len is \n%d\n, callbackType is %s, len is %d", inputTypes, len(input), reflect.TypeOf(r.callback).Name(), callbackType.NumIn())
+
+		panic(output)
 	}
 
 	var err error

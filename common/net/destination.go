@@ -81,6 +81,13 @@ func (d Destination) NetAddr() string {
 	return d.Address.String() + ":" + d.Port.String()
 }
 
+func (d Destination) UDPAddr() *net.UDPAddr {
+	return &net.UDPAddr{
+		IP:   d.Address.IP(),
+		Port: int(d.Port),
+	}
+}
+
 // String returns the strings form of this Destination.
 func (d Destination) String() string {
 	prefix := "unknown:"

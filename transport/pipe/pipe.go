@@ -49,6 +49,7 @@ func OptionsFromContext(ctx context.Context) []Option {
 // New creates a new Reader and Writer that connects to each other.
 func New(opts ...Option) (*Reader, *Writer) {
 	p := &pipe{
+		packets:     make(chan *udpPacket, 32),
 		readSignal:  signal.NewNotifier(),
 		writeSignal: signal.NewNotifier(),
 		done:        done.New(),

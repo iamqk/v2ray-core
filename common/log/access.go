@@ -21,19 +21,27 @@ const (
 )
 
 type AccessMessage struct {
-	From   interface{}
-	To     interface{}
-	Status AccessStatus
-	Reason interface{}
-	Email  string
-	Detour string
+	From        interface{}
+	To          interface{}
+	Status      AccessStatus
+	Reason      interface{}
+	Email       string
+	Detour      string
+	InboundTag  interface{}
+	OutboundTag interface{}
 }
 
 func (m *AccessMessage) String() string {
 	builder := strings.Builder{}
+	builder.WriteByte('[')
+	builder.WriteString(serial.ToString(m.InboundTag))
+	builder.WriteByte(']')
 	builder.WriteString(serial.ToString(m.From))
 	builder.WriteByte(' ')
 	builder.WriteString(string(m.Status))
+	builder.WriteByte('[')
+	builder.WriteString(serial.ToString(m.OutboundTag))
+	builder.WriteByte(']')
 	builder.WriteByte(' ')
 	builder.WriteString(serial.ToString(m.To))
 	builder.WriteByte(' ')

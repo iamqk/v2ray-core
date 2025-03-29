@@ -3,8 +3,10 @@ package pipe
 import (
 	"errors"
 	"io"
+	"net"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"v2ray.com/core/common"
@@ -13,10 +15,10 @@ import (
 	"v2ray.com/core/common/signal/done"
 )
 
-type state byte
+//type state uint32
 
 const (
-	open state = iota
+	open uint32 = iota
 	closed
 	errord
 )
@@ -30,23 +32,41 @@ func (o *pipeOption) isFull(curSize int32) bool {
 	return o.limit >= 0 && curSize > o.limit
 }
 
+type udpPacket struct {
+	data *buf.Buffer
+	addr *net.UDPAddr
+}
+
 type pipe struct {
 	sync.Mutex
 	data        buf.MultiBuffer
+	packets     chan *udpPacket
 	readSignal  *signal.Notifier
 	writeSignal *signal.Notifier
 	done        *done.Instance
 	option      pipeOption
-	state       state
+	state       uint32
+}
+
+// 获取当前 state 值
+func (p *pipe) GetState() uint32 {
+	return atomic.LoadUint32(&p.state)
+}
+
+// 设置新的 state 值
+func (p *pipe) SetState(newState uint32) {
+	atomic.StoreUint32(&p.state, newState) // 将 byte 转换为 uint32
 }
 
 var errBufferFull = errors.New("buffer full")
+
+// var errBufferEmpty = errors.New("buffer empty")
 var errSlowDown = errors.New("slow down")
 
-func (p *pipe) getState(forRead bool) error {
-	switch p.state {
+func (p *pipe) getState(forRead bool, forPacket bool) error {
+	switch p.GetState() {
 	case open:
-		if !forRead && p.option.isFull(p.data.Len()) {
+		if !forPacket && !forRead && p.option.isFull(p.data.Len()) {
 			return errBufferFull
 		}
 		return nil
@@ -54,7 +74,10 @@ func (p *pipe) getState(forRead bool) error {
 		if !forRead {
 			return io.ErrClosedPipe
 		}
-		if !p.data.IsEmpty() {
+		if !forPacket && !p.data.IsEmpty() {
+			return nil
+		}
+		if forPacket && len(p.packets) == 0 {
 			return nil
 		}
 		return io.EOF
@@ -69,7 +92,7 @@ func (p *pipe) readMultiBufferInternal() (buf.MultiBuffer, error) {
 	p.Lock()
 	defer p.Unlock()
 
-	if err := p.getState(true); err != nil {
+	if err := p.getState(true, false); err != nil {
 		return nil, err
 	}
 
@@ -89,6 +112,27 @@ func (p *pipe) ReadMultiBuffer() (buf.MultiBuffer, error) {
 		select {
 		case <-p.readSignal.Wait():
 		case <-p.done.Wait():
+		}
+	}
+}
+
+func (p *pipe) ReadPacket() (*buf.Buffer, *net.UDPAddr, error) {
+	for {
+		if err := p.getState(true, true); err != nil {
+			return nil, nil, err
+		}
+
+		select {
+		case pkt := <-p.packets:
+			p.writeSignal.Signal()
+			return pkt.data, pkt.addr, nil
+		default:
+		}
+
+		select {
+		case <-p.readSignal.Wait():
+		case <-p.done.Wait():
+			return nil, nil, io.ErrClosedPipe
 		}
 	}
 }
@@ -117,7 +161,7 @@ func (p *pipe) writeMultiBufferInternal(mb buf.MultiBuffer) error {
 	p.Lock()
 	defer p.Unlock()
 
-	if err := p.getState(false); err != nil {
+	if err := p.getState(false, false); err != nil {
 		return err
 	}
 
@@ -169,15 +213,44 @@ func (p *pipe) WriteMultiBuffer(mb buf.MultiBuffer) error {
 	}
 }
 
+func (p *pipe) WritePacket(payload *buf.Buffer, dest *net.UDPAddr) error {
+	if payload.IsEmpty() {
+		return nil
+	}
+
+	for {
+		if err := p.getState(false, true); err != nil {
+			return err
+		}
+
+		select {
+		case p.packets <- &udpPacket{data: payload, addr: dest}:
+			p.readSignal.Signal()
+			return nil
+		default:
+			if p.option.discardOverflow {
+				payload.Release()
+				return nil
+			}
+		}
+
+		select {
+		case <-p.writeSignal.Wait():
+		case <-p.done.Wait():
+			return io.ErrClosedPipe
+		}
+	}
+}
+
 func (p *pipe) Close() error {
 	p.Lock()
 	defer p.Unlock()
 
-	if p.state == closed || p.state == errord {
+	if p.GetState() == closed || p.GetState() == errord {
 		return nil
 	}
 
-	p.state = closed
+	p.SetState(closed)
 	common.Must(p.done.Close())
 	return nil
 }

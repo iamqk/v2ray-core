@@ -14,6 +14,12 @@ type Reader interface {
 	ReadMultiBuffer() (MultiBuffer, error)
 }
 
+type LinkReader interface {
+	// ReadMultiBuffer reads content from underlying reader, and put it into a MultiBuffer.
+	ReadMultiBuffer() (MultiBuffer, error)
+	ReadPacket() (*Buffer, *net.UDPAddr, error)
+}
+
 // ErrReadTimeout is an error that happens with IO timeout.
 var ErrReadTimeout = newError("IO timeout")
 
@@ -26,6 +32,12 @@ type TimeoutReader interface {
 type Writer interface {
 	// WriteMultiBuffer writes a MultiBuffer into underlying writer.
 	WriteMultiBuffer(MultiBuffer) error
+}
+
+type LinkWriter interface {
+	// WriteMultiBuffer writes a MultiBuffer into underlying writer.
+	WriteMultiBuffer(MultiBuffer) error
+	WritePacket(*Buffer, *net.UDPAddr) error
 }
 
 // WriteAllBytes ensures all bytes are written into the given writer.

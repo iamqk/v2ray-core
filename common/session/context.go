@@ -1,6 +1,10 @@
 package session
 
-import "context"
+import (
+	"context"
+
+	"github.com/eycorsican/go-tun2socks/common/stats"
+)
 
 type sessionKey int
 
@@ -8,6 +12,8 @@ const (
 	idSessionKey sessionKey = iota
 	inboundSessionKey
 	outboundSessionKey
+	proxyRecordSessionKey
+	proxySessionSessionKey
 	contentSessionKey
 	muxPreferedSessionKey
 	sockoptSessionKey
@@ -48,6 +54,17 @@ func OutboundFromContext(ctx context.Context) *Outbound {
 	return nil
 }
 
+func ContextWithProxyRecord(ctx context.Context, record *ProxyRecord) context.Context {
+	return context.WithValue(ctx, proxyRecordSessionKey, record)
+}
+
+func ProxyRecordFromContext(ctx context.Context) *ProxyRecord {
+	if record, ok := ctx.Value(proxyRecordSessionKey).(*ProxyRecord); ok {
+		return record
+	}
+	return nil
+}
+
 func ContextWithContent(ctx context.Context, content *Content) context.Context {
 	return context.WithValue(ctx, contentSessionKey, content)
 }
@@ -81,6 +98,17 @@ func ContextWithSockopt(ctx context.Context, s *Sockopt) context.Context {
 func SockoptFromContext(ctx context.Context) *Sockopt {
 	if sockopt, ok := ctx.Value(sockoptSessionKey).(*Sockopt); ok {
 		return sockopt
+	}
+	return nil
+}
+
+func ContextWithProxySession(ctx context.Context, sess *stats.Session) context.Context {
+	return context.WithValue(ctx, proxySessionSessionKey, sess)
+}
+
+func ProxySessionFromContext(ctx context.Context) *stats.Session {
+	if sess, ok := ctx.Value(proxySessionSessionKey).(*stats.Session); ok {
+		return sess
 	}
 	return nil
 }

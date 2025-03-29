@@ -1,3 +1,4 @@
+//go:build !confonly
 // +build !confonly
 
 package dispatcher
@@ -20,10 +21,14 @@ import (
 	"v2ray.com/core/features/outbound"
 	"v2ray.com/core/features/policy"
 	"v2ray.com/core/features/routing"
+
 	routing_session "v2ray.com/core/features/routing/session"
 	"v2ray.com/core/features/stats"
 	"v2ray.com/core/transport"
 	"v2ray.com/core/transport/pipe"
+
+	tstats "github.com/eycorsican/go-tun2socks/common/stats"
+	tsession "github.com/eycorsican/go-tun2socks/common/stats/session"
 )
 
 var (
@@ -36,8 +41,8 @@ type cachedReader struct {
 	cache  buf.MultiBuffer
 }
 
-func (r *cachedReader) Cache(b *buf.Buffer) {
-	mb, _ := r.reader.ReadMultiBufferTimeout(time.Millisecond * 100)
+func (r *cachedReader) Cache(b *buf.Buffer, timeout time.Duration) {
+	mb, _ := r.reader.ReadMultiBufferTimeout(timeout)
 	r.Lock()
 	if !mb.IsEmpty() {
 		r.cache, _ = buf.MergeMulti(r.cache, mb)
@@ -80,6 +85,10 @@ func (r *cachedReader) ReadMultiBufferTimeout(timeout time.Duration) (buf.MultiB
 	return r.reader.ReadMultiBufferTimeout(timeout)
 }
 
+func (r *cachedReader) ReadPacket() (*buf.Buffer, *net.UDPAddr, error) {
+	return nil, nil, nil
+}
+
 func (r *cachedReader) Interrupt() {
 	r.Lock()
 	if r.cache != nil {
@@ -95,6 +104,7 @@ type DefaultDispatcher struct {
 	router routing.Router
 	policy policy.Manager
 	stats  stats.Manager
+	stater tstats.SessionStater
 }
 
 func init() {
@@ -115,6 +125,7 @@ func (d *DefaultDispatcher) Init(config *Config, om outbound.Manager, router rou
 	d.router = router
 	d.policy = pm
 	d.stats = sm
+	d.stater = tsession.NewSimpleSessionStater()
 	return nil
 }
 
@@ -124,17 +135,30 @@ func (*DefaultDispatcher) Type() interface{} {
 }
 
 // Start implements common.Runnable.
-func (*DefaultDispatcher) Start() error {
+func (d *DefaultDispatcher) Start() error {
+	d.stater.Start()
 	return nil
 }
 
 // Close implements common.Closable.
-func (*DefaultDispatcher) Close() error { return nil }
+func (d *DefaultDispatcher) Close() error {
+	d.stater.Stop()
+	return nil
+}
 
-func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *transport.Link) {
+func (d *DefaultDispatcher) getLink(ctx context.Context, destination net.Destination) (*transport.Link, *transport.Link, *tstats.Session) {
+	var uplinkReader, downlinkReader *pipe.Reader
+	var uplinkWriter, downlinkWriter *pipe.Writer
+
 	opt := pipe.OptionsFromContext(ctx)
-	uplinkReader, uplinkWriter := pipe.New(opt...)
-	downlinkReader, downlinkWriter := pipe.New(opt...)
+
+	if destination.Network == net.Network_UDP {
+		uplinkReader, uplinkWriter = pipe.New(append(opt, pipe.DiscardOverflow())...)
+		downlinkReader, downlinkWriter = pipe.New(opt...)
+	} else {
+		uplinkReader, uplinkWriter = pipe.New(append(opt, pipe.WithSizeLimit(32*1024))...)
+		downlinkReader, downlinkWriter = pipe.New(opt...)
+	}
 
 	inboundLink := &transport.Link{
 		Reader: downlinkReader,
@@ -150,6 +174,36 @@ func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *tran
 	var user *protocol.MemoryUser
 	if sessionInbound != nil {
 		user = sessionInbound.User
+	}
+
+	var sess *tstats.Session
+	content := session.ContentFromContext(ctx)
+
+	if content != nil {
+		sess = &tstats.Session{
+			UploadBytes:        0,
+			DownloadBytes:      0,
+			Processes:          content.Application,
+			Network:            content.Network,
+			LocalAddr:          content.LocalAddr,
+			RemoteAddr:         content.RemoteAddr,
+			SessionStart:       time.Now(),
+			SessionEnd:         time.Time{},
+			Extra:              content.Extra,
+			OutboundTag:        "",
+			FirstChunkReceived: false,
+			FirstChunkReceive:  time.Time{},
+			FirstChunkDuration: "",
+		}
+		d.stater.AddSession(outboundLink, sess)
+		inboundLink.Writer = &InboundSizeWriter{
+			Session: sess,
+			Writer:  inboundLink.Writer,
+		}
+		outboundLink.Writer = &OutboundSizeWriter{
+			Session: sess,
+			Writer:  outboundLink.Writer,
+		}
 	}
 
 	if user != nil && len(user.Email) > 0 {
@@ -174,7 +228,7 @@ func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *tran
 		}
 	}
 
-	return inboundLink, outboundLink
+	return inboundLink, outboundLink, sess
 }
 
 func shouldOverride(result SniffResult, domainOverride []string) bool {
@@ -191,13 +245,16 @@ func (d *DefaultDispatcher) Dispatch(ctx context.Context, destination net.Destin
 	if !destination.IsValid() {
 		panic("Dispatcher: Invalid destination.")
 	}
+
 	ob := &session.Outbound{
 		Target: destination,
 	}
-	ctx = session.ContextWithOutbound(ctx, ob)
 
-	inbound, outbound := d.getLink(ctx)
+	ctx = session.ContextWithOutbound(ctx, ob)
+	inbound, outbound, sess := d.getLink(ctx, destination)
+	ctx = session.ContextWithProxySession(ctx, sess)
 	content := session.ContentFromContext(ctx)
+
 	if content == nil {
 		content = new(session.Content)
 		ctx = session.ContextWithContent(ctx, content)
@@ -220,6 +277,12 @@ func (d *DefaultDispatcher) Dispatch(ctx context.Context, destination net.Destin
 				newError("sniffed domain: ", domain).WriteToLog(session.ExportIDToError(ctx))
 				destination.Address = net.ParseAddress(domain)
 				ob.Target = destination
+				if record := session.ProxyRecordFromContext(ctx); record != nil {
+					record.Target = destination.String()
+				}
+				if sess != nil {
+					sess.RemoteAddr = destination.NetAddr()
+				}
 			}
 			d.routedDispatch(ctx, outbound, destination)
 		}()
@@ -242,8 +305,11 @@ func sniffer(ctx context.Context, cReader *cachedReader) (SniffResult, error) {
 			if totalAttempt > 2 {
 				return nil, errSniffingTimeout
 			}
-
-			cReader.Cache(payload)
+			timeout := time.Millisecond * 300
+			if totalAttempt > 1 {
+				timeout = time.Millisecond * 5
+			}
+			cReader.Cache(payload, timeout)
 			if !payload.IsEmpty() {
 				result, err := sniffer.Sniff(payload.Bytes())
 				if err != common.ErrNoClue {
@@ -289,6 +355,13 @@ func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.
 		return
 	}
 
+	if record := session.ProxyRecordFromContext(ctx); record != nil {
+		record.Tag = handler.Tag()
+	}
+	if sess := session.ProxySessionFromContext(ctx); sess != nil {
+		sess.OutboundTag = handler.Tag()
+	}
+
 	if accessMessage := log.AccessMessageFromContext(ctx); accessMessage != nil {
 		if tag := handler.Tag(); tag != "" {
 			accessMessage.Detour = tag
@@ -297,4 +370,6 @@ func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.
 	}
 
 	handler.Dispatch(ctx, link)
+
+	d.stater.RemoveSession(link)
 }

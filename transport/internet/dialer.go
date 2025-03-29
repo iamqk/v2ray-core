@@ -14,6 +14,8 @@ type Dialer interface {
 
 	// Address returns the address used by this Dialer. Maybe nil if not known.
 	Address() net.Address
+
+	DialUDP(ctx context.Context) (net.PacketConn, error)
 }
 
 // dialFunc is an interface to dial network connection to a specific destination.
@@ -60,6 +62,17 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *MemoryStrea
 	}
 
 	return nil, newError("unknown network ", dest.Network)
+}
+
+func DialUDP(ctx context.Context, streamSettings *MemoryStreamConfig) (net.PacketConn, error) {
+	var src *net.UDPAddr
+	if outbound := session.OutboundFromContext(ctx); outbound != nil && outbound.Gateway != nil {
+		src = &net.UDPAddr{
+			IP:   outbound.Gateway.IP(),
+			Port: 0,
+		}
+	}
+	return ListenSystemPacket(ctx, src, streamSettings.SocketSettings)
 }
 
 // DialSystem calls system dialer to create a network connection.

@@ -25,7 +25,9 @@ func ReadFile(path string) ([]byte, error) {
 }
 
 func ReadAsset(file string) ([]byte, error) {
-	return ReadFile(platform.GetAssetLocation(file))
+	//fix path for Asset
+	return ReadFile(platform.GetAssetLocation("./" + file))
+	//return ReadFile(platform.GetAssetLocation(file))
 }
 
 func CopyFile(dst string, src string) error {

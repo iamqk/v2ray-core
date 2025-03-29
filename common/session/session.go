@@ -4,6 +4,7 @@ package session // import "v2ray.com/core/common/session"
 import (
 	"context"
 	"math/rand"
+	"time"
 
 	"v2ray.com/core/common/errors"
 	"v2ray.com/core/common/net"
@@ -42,7 +43,8 @@ type Inbound struct {
 	// Tag of the inbound proxy that handles the connection.
 	Tag string
 	// User is the user that authencates for the inbound. May be nil if the protocol allows anounymous traffic.
-	User *protocol.MemoryUser
+	User     *protocol.MemoryUser
+	NoSource bool
 }
 
 // Outbound is the metadata of an outbound connection.
@@ -51,6 +53,33 @@ type Outbound struct {
 	Target net.Destination
 	// Gateway address
 	Gateway net.Address
+
+	// ResolvedIPs is the resolved IP addresses, if the Targe is a domain address.
+	ResolvedIPs []net.IP
+
+	Timeout time.Duration
+}
+
+type ProxyRecord struct {
+	Target        string
+	Tag           string
+	StartTime     int64
+	EndTime       int64
+	UploadBytes   int32
+	DownloadBytes int32
+	RecordType    int32 // 0: TCP/UDP, 1: DNS
+	DNSQueryType  int32
+	DNSRequest    string
+	DNSResponse   string
+	DNSNumIPs     int32
+}
+
+func (r *ProxyRecord) AddUploadBytes(n int32) {
+	r.UploadBytes += n
+}
+
+func (r *ProxyRecord) AddDownloadBytes(n int32) {
+	r.DownloadBytes += n
 }
 
 // SniffingRequest controls the behavior of content sniffing.
@@ -69,6 +98,13 @@ type Content struct {
 	Attributes map[string]string
 
 	SkipRoutePick bool
+
+	Application []string
+	Network     string
+	LocalAddr   string
+	RemoteAddr  string
+	Extra       string
+	OutboundTag string
 }
 
 // Sockopt is the settings for socket connection.

@@ -251,18 +251,37 @@ func fetchInput(ctx context.Context, s *Session, output buf.Writer) {
 	defer writer.Close() // nolint: errcheck
 
 	newError("dispatching request to ", dest).WriteToLog(session.ExportIDToError(ctx))
-	if err := writeFirstPayload(s.input, writer); err != nil {
-		newError("failed to write first payload").Base(err).WriteToLog(session.ExportIDToError(ctx))
-		writer.hasError = true
-		common.Interrupt(s.input)
-		return
-	}
 
-	if err := buf.Copy(s.input, writer); err != nil {
-		newError("failed to fetch all input").Base(err).WriteToLog(session.ExportIDToError(ctx))
-		writer.hasError = true
-		common.Interrupt(s.input)
-		return
+	if dest.Network == net.Network_TCP {
+		if err := writeFirstPayload(s.input, writer); err != nil {
+			newError("failed to write first payload").Base(err).WriteToLog(session.ExportIDToError(ctx))
+			writer.hasError = true
+			common.Interrupt(s.input)
+			return
+		}
+
+		if err := buf.Copy(s.input, writer); err != nil {
+			newError("failed to fetch all input").Base(err).WriteToLog(session.ExportIDToError(ctx))
+			writer.hasError = true
+			common.Interrupt(s.input)
+			return
+		}
+	} else {
+		streamReader := &buf.PacketToStreamReader{Reader: s.input.(buf.LinkReader)}
+
+		if err := writeFirstPayload(streamReader, writer); err != nil {
+			newError("failed to write first payload").Base(err).WriteToLog(session.ExportIDToError(ctx))
+			writer.hasError = true
+			common.Interrupt(s.input)
+			return
+		}
+
+		if err := buf.Copy(streamReader, writer); err != nil {
+			newError("failed to fetch all input").Base(err).WriteToLog(session.ExportIDToError(ctx))
+			writer.hasError = true
+			common.Interrupt(s.input)
+			return
+		}
 	}
 }
 
@@ -298,25 +317,26 @@ func (m *ClientWorker) Dispatch(ctx context.Context, link *transport.Link) bool 
 	}
 	s.input = link.Reader
 	s.output = link.Writer
+	s.destination = session.OutboundFromContext(ctx).Target
 	go fetchInput(ctx, s, m.link.Writer)
 	return true
 }
 
-func (m *ClientWorker) handleStatueKeepAlive(meta *FrameMetadata, reader *buf.BufferedReader) error {
+func (m *ClientWorker) handleStatueKeepAlive(meta *FrameMetadata, reader io.Reader) error {
 	if meta.Option.Has(OptionData) {
 		return buf.Copy(NewStreamReader(reader), buf.Discard)
 	}
 	return nil
 }
 
-func (m *ClientWorker) handleStatusNew(meta *FrameMetadata, reader *buf.BufferedReader) error {
+func (m *ClientWorker) handleStatusNew(meta *FrameMetadata, reader io.Reader) error {
 	if meta.Option.Has(OptionData) {
 		return buf.Copy(NewStreamReader(reader), buf.Discard)
 	}
 	return nil
 }
 
-func (m *ClientWorker) handleStatusKeep(meta *FrameMetadata, reader *buf.BufferedReader) error {
+func (m *ClientWorker) handleStatusKeep(meta *FrameMetadata, reader io.Reader) error {
 	if !meta.Option.Has(OptionData) {
 		return nil
 	}
@@ -330,25 +350,43 @@ func (m *ClientWorker) handleStatusKeep(meta *FrameMetadata, reader *buf.Buffere
 		return buf.Copy(NewStreamReader(reader), buf.Discard)
 	}
 
-	rr := s.NewReader(reader)
-	err := buf.Copy(rr, s.output)
-	if err != nil && buf.IsWriteError(err) {
-		newError("failed to write to downstream. closing session ", s.ID).Base(err).WriteToLog()
+	if s.destination.Network == net.Network_TCP {
+		rr := s.NewReader(reader)
+		err := buf.Copy(rr, s.output)
+		if err != nil && buf.IsWriteError(err) {
+			newError("failed to write to downstream. closing session ", s.ID).Base(err).WriteToLog()
 
-		// Notify remote peer to close this session.
-		closingWriter := NewResponseWriter(meta.SessionID, m.link.Writer, protocol.TransferTypeStream)
-		closingWriter.Close()
+			// Notify remote peer to close this session.
+			closingWriter := NewResponseWriter(meta.SessionID, m.link.Writer, protocol.TransferTypeStream)
+			closingWriter.Close()
 
-		drainErr := buf.Copy(rr, buf.Discard)
-		common.Interrupt(s.input)
-		s.Close()
-		return drainErr
+			drainErr := buf.Copy(rr, buf.Discard)
+			common.Interrupt(s.input)
+			s.Close()
+			return drainErr
+		}
+		return err
+	} else {
+		rr := s.NewReader(reader)
+		ur := &buf.StreamToPacketReader{Reader: rr, Destination: s.destination.UDPAddr()}
+		err := buf.CopyPacket(ur, s.output.(buf.LinkWriter))
+		if err != nil && buf.IsWriteError(err) {
+			newError("failed to write to downstream. closing session ", s.ID).Base(err).WriteToLog()
+
+			// Notify remote peer to close this session.
+			closingWriter := NewResponseWriter(meta.SessionID, m.link.Writer, protocol.TransferTypeStream)
+			closingWriter.Close()
+
+			drainErr := buf.CopyPacket(ur, buf.Discard.(buf.LinkWriter))
+			common.Interrupt(s.input)
+			s.Close()
+			return drainErr
+		}
+		return err
 	}
-
-	return err
 }
 
-func (m *ClientWorker) handleStatusEnd(meta *FrameMetadata, reader *buf.BufferedReader) error {
+func (m *ClientWorker) handleStatusEnd(meta *FrameMetadata, reader io.Reader) error {
 	if s, found := m.sessionManager.Get(meta.SessionID); found {
 		if meta.Option.Has(OptionError) {
 			common.Interrupt(s.input)

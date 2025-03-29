@@ -95,6 +95,25 @@ func copyInternal(reader Reader, writer Writer, handler *copyHandler) error {
 	}
 }
 
+func copyPacketInternal(reader LinkReader, writer LinkWriter, handler *copyHandler) error {
+	for {
+		buffer, addr, err := reader.ReadPacket()
+		if buffer != nil && !buffer.IsEmpty() {
+			for _, handler := range handler.onData {
+				handler(MultiBuffer{buffer})
+			}
+
+			if werr := writer.WritePacket(buffer, addr); werr != nil {
+				return writeError{werr}
+			}
+		}
+
+		if err != nil {
+			return readError{err}
+		}
+	}
+}
+
 // Copy dumps all payload from reader to writer or stops when an error occurs. It returns nil when EOF.
 func Copy(reader Reader, writer Writer, options ...CopyOption) error {
 	var handler copyHandler
@@ -102,6 +121,18 @@ func Copy(reader Reader, writer Writer, options ...CopyOption) error {
 		option(&handler)
 	}
 	err := copyInternal(reader, writer, &handler)
+	if err != nil && errors.Cause(err) != io.EOF {
+		return err
+	}
+	return nil
+}
+
+func CopyPacket(reader LinkReader, writer LinkWriter, options ...CopyOption) error {
+	var handler copyHandler
+	for _, option := range options {
+		option(&handler)
+	}
+	err := copyPacketInternal(reader, writer, &handler)
 	if err != nil && errors.Cause(err) != io.EOF {
 		return err
 	}

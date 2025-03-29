@@ -2,6 +2,7 @@ package buf
 
 import (
 	"io"
+	"net"
 
 	"v2ray.com/core/common"
 	"v2ray.com/core/common/errors"
@@ -168,6 +169,51 @@ type PacketReader struct {
 func (r *PacketReader) ReadMultiBuffer() (MultiBuffer, error) {
 	b, err := readOneUDP(r.Reader)
 	if err != nil {
+		return nil, err
+	}
+	return MultiBuffer{b}, nil
+}
+
+type StreamToPacketReader struct {
+	Buffer      MultiBuffer
+	Reader      Reader
+	Destination *net.UDPAddr
+}
+
+func (r *StreamToPacketReader) ReadPacket() (*Buffer, *net.UDPAddr, error) {
+	if !r.Buffer.IsEmpty() {
+		b := r.Buffer[0]
+		r.Buffer = r.Buffer[1:]
+		return b, r.Destination, nil
+	}
+
+	mb, err := r.Reader.ReadMultiBuffer()
+	if err != nil {
+		return nil, nil, err
+	}
+	if mb.IsEmpty() {
+		return nil, nil, nil
+	}
+	b := mb[0]
+	if len(mb) > 1 {
+		r.Buffer, _ = MergeMulti(r.Buffer, mb[1:])
+	}
+	return b, r.Destination, nil
+}
+
+// Dummy method.
+func (v *StreamToPacketReader) ReadMultiBuffer() (MultiBuffer, error) {
+	return nil, nil
+}
+
+type PacketToStreamReader struct {
+	Reader LinkReader
+}
+
+func (r *PacketToStreamReader) ReadMultiBuffer() (MultiBuffer, error) {
+	b, _, err := r.Reader.ReadPacket()
+	if err != nil {
+		b.Release()
 		return nil, err
 	}
 	return MultiBuffer{b}, nil
